@@ -10,17 +10,17 @@
 //
 //  import (
 //      "fmt"
-//      "github.com/julienschmidt/httprouter"
+//      "github.com/fcavani/httprouter"
 //      "net/http"
 //      "log"
 //  )
 //
-//  func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+//  func Index(w http.ResponseWriter, r *http.Request) {
 //      fmt.Fprint(w, "Welcome!\n")
 //  }
 //
-//  func Hello(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-//      fmt.Fprintf(w, "hello, %s!\n", ps.ByName("name"))
+//  func Hello(w http.ResponseWriter, r *http.Request) {
+//      fmt.Fprintf(w, "hello, %s!\n", Parameters(r).ByName("name"))
 //  }
 //
 //  func main() {
@@ -65,28 +65,33 @@
 //   /files                              no match, but the router would redirect
 //
 // The value of parameters is saved as a slice of the Param struct, consisting
-// each of a key and a value. The slice is passed to the Handle func as a third
-// parameter.
+// each of a key and a value. The slice is stored in the requests context and
+// is accessible by the function Parameters(r), where r is the pointer to the
+// http.Request.
 // There are two ways to retrieve the value of a parameter:
 //  // by the name of the parameter
-//  user := ps.ByName("user") // defined by :user or *user
+//  user := Parameters(r).ByName("user") // defined by :user or *user
 //
 //  // by the index of the parameter. This way you can also get the name (key)
-//  thirdKey   := ps[2].Key   // the name of the 3rd parameter
-//  thirdValue := ps[2].Value // the value of the 3rd parameter
+//  thirdKey   := Parameters(r)[2].Key   // the name of the 3rd parameter
+//  thirdValue := Parameters(r)[2].Value // the value of the 3rd parameter
 package httprouter
 
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	log "github.com/fcavani/slog"
 )
 
 // Handle is a function that can be registered to a route to handle HTTP
 // requests. Like http.HandlerFunc, but has a third parameter for the values of
-// wildcards (path variables).
-type Handle func(http.ResponseWriter, *http.Request, Params)
+// wildcards (variables).
+//type Handle func(http.ResponseWriter, *http.Request, Params)
 
 // Param is a single URL parameter, consisting of a key and a value.
 type Param struct {
@@ -186,6 +191,17 @@ type Router struct {
 	// The handler can be used to keep your server from crashing because of
 	// unrecovered panics.
 	PanicHandler func(http.ResponseWriter, *http.Request, interface{})
+
+	// Context is a function to insert a new context just after the http request
+	// context and before the router params.
+	Context func(context.Context) (context.Context, context.CancelFunc)
+
+	// Languages supporteds by the router.
+	SupportedLangs map[string]struct{}
+	// Fallback language for the case where there is no
+	// lang in the url or the lang selected is not available
+	// for that resource.
+	DefaultLang string
 }
 
 // Make sure the Router conforms with the http.Handler interface
@@ -199,6 +215,23 @@ func New() *Router {
 		RedirectFixedPath:      true,
 		HandleMethodNotAllowed: true,
 		HandleOPTIONS:          true,
+		Context: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return ctx, nil
+		},
+		SupportedLangs: map[string]struct{}{
+			"en": struct{}{},
+		},
+		DefaultLang: "",
+	}
+}
+
+// HandlerPaths iter over all handlers path. If f returns
+// false HandlerPaths stops iterate.
+func (r *Router) HandlerPaths(params bool, f func(method, path string, h http.HandlerFunc) bool) {
+	for m, n := range r.trees {
+		if !iter(params, m, "", n, f) {
+			return
+		}
 	}
 }
 
@@ -214,39 +247,39 @@ func (r *Router) putParams(ps *Params) {
 	}
 }
 
-// GET is a shortcut for router.Handle(http.MethodGet, path, handle)
-func (r *Router) GET(path string, handle Handle) {
-	r.Handle(http.MethodGet, path, handle)
+// GET is a shortcut for router.Handle(http.MethodGet, path, i18n, handle)
+func (r *Router) GET(path string, i18n bool, handle http.HandlerFunc) {
+	r.Handle(http.MethodGet, path, i18n, handle)
 }
 
-// HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
-func (r *Router) HEAD(path string, handle Handle) {
-	r.Handle(http.MethodHead, path, handle)
+// HEAD is a shortcut for router.Handle(http.MethodHead, path, i18n, handle)
+func (r *Router) HEAD(path string, i18n bool, handle http.HandlerFunc) {
+	r.Handle(http.MethodHead, path, i18n, handle)
 }
 
-// OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
-func (r *Router) OPTIONS(path string, handle Handle) {
-	r.Handle(http.MethodOptions, path, handle)
+// OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, i18n, handle)
+func (r *Router) OPTIONS(path string, handle http.HandlerFunc) {
+	r.Handle(http.MethodOptions, path, false, handle)
 }
 
-// POST is a shortcut for router.Handle(http.MethodPost, path, handle)
-func (r *Router) POST(path string, handle Handle) {
-	r.Handle(http.MethodPost, path, handle)
+// POST is a shortcut for router.Handle(http.MethodPost, path, i18n, handle)
+func (r *Router) POST(path string, i18n bool, handle http.HandlerFunc) {
+	r.Handle(http.MethodPost, path, i18n, handle)
 }
 
-// PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
-func (r *Router) PUT(path string, handle Handle) {
-	r.Handle(http.MethodPut, path, handle)
+// PUT is a shortcut for router.Handle(http.MethodPut, path, i18n, handle)
+func (r *Router) PUT(path string, i18n bool, handle http.HandlerFunc) {
+	r.Handle(http.MethodPut, path, i18n, handle)
 }
 
-// PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
-func (r *Router) PATCH(path string, handle Handle) {
-	r.Handle(http.MethodPatch, path, handle)
+// PATCH is a shortcut for router.Handle(http.MethodPatch, path, i18n, handle)
+func (r *Router) PATCH(path string, handle http.HandlerFunc) {
+	r.Handle(http.MethodPatch, path, false, handle)
 }
 
-// DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
-func (r *Router) DELETE(path string, handle Handle) {
-	r.Handle(http.MethodDelete, path, handle)
+// DELETE is a shortcut for router.Handle(http.MethodDelete, path, i18n, handle)
+func (r *Router) DELETE(path string, handle http.HandlerFunc) {
+	r.Handle(http.MethodDelete, path, false, handle)
 }
 
 // Handle registers a new request handle with the given path and method.
@@ -257,7 +290,7 @@ func (r *Router) DELETE(path string, handle Handle) {
 // This function is intended for bulk loading and to allow the usage of less
 // frequently used, non-standardized or custom methods (e.g. for internal
 // communication with a proxy).
-func (r *Router) Handle(method, path string, handle Handle) {
+func (r *Router) Handle(method, path string, i18n bool, handle http.HandlerFunc) {
 	if method == "" {
 		panic("method must not be empty")
 	}
@@ -280,7 +313,7 @@ func (r *Router) Handle(method, path string, handle Handle) {
 		r.globalAllowed = r.allowed("*", "")
 	}
 
-	root.addRoute(path, handle)
+	root.addRoute(path, i18n, handle)
 
 	// Update maxParams
 	if pc := countParams(path); pc > r.maxParams {
@@ -298,15 +331,9 @@ func (r *Router) Handle(method, path string, handle Handle) {
 
 // Handler is an adapter which allows the usage of an http.Handler as a
 // request handle.
-// The Params are available in the request context under ParamsKey.
-func (r *Router) Handler(method, path string, handler http.Handler) {
-	r.Handle(method, path,
-		func(w http.ResponseWriter, req *http.Request, p Params) {
-			if len(p) > 0 {
-				ctx := req.Context()
-				ctx = context.WithValue(ctx, ParamsKey, p)
-				req = req.WithContext(ctx)
-			}
+func (r *Router) Handler(method, path string, i18n bool, handler http.Handler) {
+	r.Handle(method, path, i18n,
+		func(w http.ResponseWriter, req *http.Request) {
 			handler.ServeHTTP(w, req)
 		},
 	)
@@ -314,8 +341,8 @@ func (r *Router) Handler(method, path string, handler http.Handler) {
 
 // HandlerFunc is an adapter which allows the usage of an http.HandlerFunc as a
 // request handle.
-func (r *Router) HandlerFunc(method, path string, handler http.HandlerFunc) {
-	r.Handler(method, path, handler)
+func (r *Router) HandlerFunc(method, path string, i18n bool, handler http.HandlerFunc) {
+	r.Handler(method, path, i18n, handler)
 }
 
 // ServeFiles serves files from the given file system root.
@@ -335,8 +362,8 @@ func (r *Router) ServeFiles(path string, root http.FileSystem) {
 
 	fileServer := http.FileServer(root)
 
-	r.GET(path, func(w http.ResponseWriter, req *http.Request, ps Params) {
-		req.URL.Path = ps.ByName("filepath")
+	r.GET(path, false, func(w http.ResponseWriter, req *http.Request) {
+		req.URL.Path = Parameters(req).ByName("filepath")
 		fileServer.ServeHTTP(w, req)
 	})
 }
@@ -352,9 +379,29 @@ func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
 // If the path was found, it returns the handle function and the path parameter
 // values. Otherwise the third return value indicates whether a redirection to
 // the same path with an extra / without the trailing slash should be performed.
-func (r *Router) Lookup(method, path string) (Handle, Params, bool) {
+func (r *Router) Lookup(method, path string) (http.HandlerFunc, Params, bool) {
+	trailSlash := false
+	if path[len(path)-1] == '/' {
+		trailSlash = true
+	}
+	psplit := splitPath(path)
+	if r.DefaultLang != "" {
+		if len(psplit) > 0 {
+			candidate := psplit[0]
+			_, found := r.SupportedLangs[candidate]
+			if found {
+				if len(psplit) > 1 {
+					path = "/" + filepath.Join(psplit[1:]...)
+				}
+			}
+		}
+		if trailSlash {
+			path += "/"
+		}
+	}
+
 	if root := r.trees[method]; root != nil {
-		handle, ps, tsr := root.getValue(path, r.getParams)
+		handle, ps, _, tsr := root.getValue(path, r.getParams)
 		if handle == nil {
 			r.putParams(ps)
 			return nil, nil, tsr
@@ -390,7 +437,7 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 				continue
 			}
 
-			handle, _, _ := r.trees[method].getValue(path, nil)
+			handle, _, _, _ := r.trees[method].getValue(path, nil)
 			if handle != nil {
 				// Add request method to list of allowed methods
 				allowed = append(allowed, method)
@@ -418,20 +465,88 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 }
 
 // ServeHTTP makes the router implement the http.Handler interface.
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (r *Router) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	start := time.Now()
+	defer func() {
+		log.InfoLevel().Tag("httprouter", "statistics").Printf("Method=%v, Path=%v, Execution=%v", req.Method, req.URL.Path, time.Since(start))
+	}()
+	w := NewResponseWriter()
+	defer func() {
+		w.Copy(rw)
+	}()
+
+	path := req.URL.Path
+	rawpath := path
+
 	if r.PanicHandler != nil {
 		defer r.recv(w, req)
 	}
 
-	path := req.URL.Path
-
 	if root := r.trees[req.Method]; root != nil {
-		if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
+		if handle, ps, i18n, tsr := root.getValue(path, r.getParams); handle != nil {
+			if r.DefaultLang != "" && i18n == true {
+				req, path = r.selectLang(w, req)
+			}
 			if ps != nil {
-				handle(w, req, *ps)
+				req = req.WithContext(context.WithValue(req.Context(), "Params", *ps))
+				handle(w, req)
 				r.putParams(ps)
 			} else {
-				handle(w, req, nil)
+				// Put in the context all parameters
+				ctx := req.Context()
+				if r.Context != nil {
+					var cancelCtx context.CancelFunc
+					ctx, cancelCtx = r.Context(ctx)
+					if cancelCtx != nil {
+						defer cancelCtx()
+					}
+				}
+
+				req = req.WithContext(context.WithValue(req.Context(), "Params", nil))
+				s := make(chan struct{})
+
+				go func(w http.ResponseWriter, req *http.Request) {
+					if r.PanicHandler != nil {
+						defer func() {
+							if rcv := recover(); rcv != nil {
+								r.PanicHandler(w, req, rcv)
+								s <- struct{}{}
+							}
+						}()
+					}
+					// Call handler
+					handle(w, req)
+					s <- struct{}{}
+				}(w, req)
+
+				select {
+				case <-s:
+					// Signal telling that the handle was executed.
+					return
+				case <-ctx.Done():
+					w.Reset()
+					switch ctx.Err() {
+					case context.Canceled:
+						http.Error(w,
+							"Context canceled",
+							http.StatusInternalServerError,
+						)
+						log.DebugLevel().Tag("httprouter").Printf("Context send a signal. Handler terminated. Method=%v Path=%v Err: context canceled.", req.Method, req.URL.Path)
+					case context.DeadlineExceeded:
+						// TODO: Custom error???
+						http.Error(w,
+							http.StatusText(http.StatusRequestTimeout),
+							http.StatusRequestTimeout,
+						)
+						log.DebugLevel().Tag("httprouter").Printf("Context send a signal. Handler terminated. Method=%v Path=%v Err: deadline exceeded.", req.Method, req.URL.Path)
+					default:
+						http.Error(w,
+							http.StatusText(http.StatusInternalServerError),
+							http.StatusInternalServerError,
+						)
+						log.DebugLevel().Tag("httprouter").Printf("Context send a signal. Handler terminated. Method=%v Path=%v Err: unknown.", req.Method, req.URL.Path)
+					}
+				}
 			}
 			return
 		} else if req.Method != http.MethodConnect && path != "/" {
@@ -443,10 +558,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 
 			if tsr && r.RedirectTrailingSlash {
-				if len(path) > 1 && path[len(path)-1] == '/' {
-					req.URL.Path = path[:len(path)-1]
+				if len(rawpath) > 1 && rawpath[len(rawpath)-1] == '/' {
+					req.URL.Path = rawpath[:len(rawpath)-1]
 				} else {
-					req.URL.Path = path + "/"
+					req.URL.Path = rawpath + "/"
 				}
 				http.Redirect(w, req, req.URL.String(), code)
 				return
@@ -497,4 +612,177 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	} else {
 		http.NotFound(w, req)
 	}
+}
+
+func (r *Router) selectLang(w http.ResponseWriter, req *http.Request) (*http.Request, string) {
+	selectedLang := r.DefaultLang
+	path := req.URL.Path
+
+	if lang := r.acceptedLanguage(req); lang != "" {
+		selectedLang = lang
+	}
+
+	if req.URL.String() != "*" {
+		trailSlash := false
+		if len(path) > 0 && path[len(path)-1] == '/' {
+			trailSlash = true
+		}
+		psplit := splitPath(path)
+		if len(psplit) > 0 {
+			candidate := psplit[0]
+			// TODO: Search for language of the same family.
+			// Example: pt-BR not found, search for another, maybe pt-PT or pt.
+			_, found := r.SupportedLangs[candidate]
+			if found {
+				selectedLang = candidate
+				if len(psplit) > 1 {
+					path = "/" + filepath.Join(psplit[1:]...)
+					if trailSlash {
+						path += "/"
+					}
+				} else if len(psplit) == 1 {
+					path = "/"
+				}
+			} else {
+				req = req.WithContext(context.WithValue(req.Context(), "UASelectedLang", selectedLang))
+				redirLang(w, req, selectedLang)
+				return req, path
+			}
+		} else {
+			req = req.WithContext(context.WithValue(req.Context(), "UASelectedLang", selectedLang))
+			redirLang(w, req, selectedLang)
+			return req, path
+		}
+	}
+
+	req = req.WithContext(context.WithValue(req.Context(), "UASelectedLang", selectedLang))
+
+	return req, path
+}
+
+// PathExist returns true if a path exist. If the path
+//have parameters its checks if the begin of the path
+//exist.
+func (r *Router) PathExist(name string) bool {
+	for _, n := range r.trees {
+		if find(name, "", n) {
+			return true
+		}
+	}
+	return false
+}
+
+// Parameters return the url params from the requests context.
+func Parameters(req *http.Request) Params {
+	p := req.Context().Value("Params")
+	if p != nil {
+		return p.(Params)
+	}
+	return nil
+}
+
+//ContentLang return the language negotiated with the client.
+func ContentLang(req *http.Request) string {
+	lang := req.Context().Value("UASelectedLang")
+	if lang != nil {
+		return lang.(string)
+	}
+	return ""
+}
+
+func (r *Router) acceptedLanguage(req *http.Request) string {
+	params := req.Header.Get("Accept-Language")
+	if params == "" {
+		return ""
+	}
+	params = strings.ToLower(params)
+	parsed, err := ParseLang(params)
+	if err != nil {
+		return ""
+	}
+	param := parsed.FindBest(r.SupportedLangs)
+	if param == "" {
+		return ""
+	}
+	return param
+}
+
+func redirLang(w http.ResponseWriter, req *http.Request, lang string) {
+	code := 301
+	if req.Method != "GET" {
+		code = 307
+	}
+	req.URL.Path = "/" + lang + req.URL.Path
+	http.Redirect(w, req, req.URL.String(), code)
+}
+
+func splitPath(path string) []string {
+	p := strings.Split(path, "/")
+	psplit := make([]string, 0, len(p))
+	for _, elem := range p {
+		if elem == "" {
+			continue
+		}
+		psplit = append(psplit, strings.TrimSpace(elem))
+	}
+	return psplit
+}
+
+func find(name, path string, n *node) bool {
+	if n.handle != nil {
+		if n.nType == catchAll {
+			if name == path {
+				return true
+			}
+			return false
+		} else if n.nType == param {
+			if strings.HasPrefix(path, name) {
+				return true
+			}
+			return false
+		}
+		if name == path+n.path {
+			return true
+		}
+	}
+	for _, child := range n.children {
+		p := path + n.path
+		if find(name, p, child) {
+			return true
+		}
+	}
+	return false
+}
+
+func iter(params bool, method, path string, n *node, f func(m, p string, h http.HandlerFunc) bool) bool {
+	if n.handle != nil {
+		if !params {
+			if n.nType == catchAll {
+				if !f(method, path, n.handle) {
+					return false
+				}
+				return true
+			} else if n.nType == param {
+				path = strings.TrimSuffix(path, "/")
+				i := strings.LastIndex(path, "/")
+				if i >= 1 {
+					path = path[:i]
+				}
+				if !f(method, path, n.handle) {
+					return false
+				}
+				return true
+			}
+		}
+		if !f(method, path+n.path, n.handle) {
+			return false
+		}
+	}
+	for _, child := range n.children {
+		p := path + n.path
+		if !iter(params, method, p, child, f) {
+			return false
+		}
+	}
+	return true
 }

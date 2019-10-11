@@ -5,6 +5,7 @@
 package httprouter
 
 import (
+	"net/http"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -78,7 +79,8 @@ type node struct {
 	nType     nodeType
 	priority  uint32
 	children  []*node
-	handle    Handle
+	handle    http.HandlerFunc
+	i18n      bool
 }
 
 // Increments priority of the given child and reorders if necessary
@@ -107,13 +109,13 @@ func (n *node) incrementChildPrio(pos int) int {
 
 // addRoute adds a node with the given handle to the path.
 // Not concurrency-safe!
-func (n *node) addRoute(path string, handle Handle) {
+func (n *node) addRoute(path string, i18n bool, handle http.HandlerFunc) {
 	fullPath := path
 	n.priority++
 
 	// Empty tree
 	if len(n.path) == 0 && len(n.indices) == 0 {
-		n.insertChild(path, fullPath, handle)
+		n.insertChild(path, fullPath, i18n, handle)
 		n.nType = root
 		return
 	}
@@ -202,7 +204,7 @@ walk:
 				n.incrementChildPrio(len(n.indices) - 1)
 				n = child
 			}
-			n.insertChild(path, fullPath, handle)
+			n.insertChild(path, fullPath, i18n, handle)
 			return
 		}
 
@@ -215,7 +217,7 @@ walk:
 	}
 }
 
-func (n *node) insertChild(path, fullPath string, handle Handle) {
+func (n *node) insertChild(path, fullPath string, i18n bool, handle http.HandlerFunc) {
 	for {
 		// Find prefix until first wildcard
 		wildcard, i, valid := findWildcard(path)
@@ -271,6 +273,7 @@ func (n *node) insertChild(path, fullPath string, handle Handle) {
 
 			// Otherwise we're done. Insert the handle in the new leaf
 			n.handle = handle
+			n.i18n = i18n
 			return
 
 		} else { // catchAll
@@ -306,6 +309,7 @@ func (n *node) insertChild(path, fullPath string, handle Handle) {
 				nType:    catchAll,
 				handle:   handle,
 				priority: 1,
+				i18n:     i18n,
 			}
 			n.children = []*node{child}
 
@@ -316,6 +320,7 @@ func (n *node) insertChild(path, fullPath string, handle Handle) {
 	// If no wildcard was found, simple insert the path and handle
 	n.path = path
 	n.handle = handle
+	n.i18n = i18n
 }
 
 // Returns the handle registered with the given path (key). The values of
@@ -323,7 +328,13 @@ func (n *node) insertChild(path, fullPath string, handle Handle) {
 // If no handle can be found, a TSR (trailing slash redirect) recommendation is
 // made if a handle exists with an extra (without the) trailing slash for the
 // given path.
-func (n *node) getValue(path string, params func() *Params) (handle Handle, ps *Params, tsr bool) {
+func (n *node) getValue(path string, params func() *Params) (handle http.HandlerFunc, ps *Params, inter, tsr bool) {
+	var i18n string = "false"
+	if n.i18n == true {
+		i18n = "true"
+	}
+	inter = n.i18n
+	var insertI18n bool = true
 walk: // Outer loop for walking the tree
 	for {
 		prefix := n.path
@@ -340,6 +351,7 @@ walk: // Outer loop for walking the tree
 						if c == idxc {
 							n = n.children[i]
 							prefix = n.path
+							// insertI18n = true
 							continue walk
 						}
 					}
@@ -368,12 +380,23 @@ walk: // Outer loop for walking the tree
 							ps = params()
 						}
 						// Expand slice within preallocated capacity
-						i := len(*ps)
-						*ps = (*ps)[:i+1]
-						(*ps)[i] = Param{
+						// i := len(*ps)
+						// *ps = (*ps)[:i+1]
+						// (*ps)[i] = Param{
+						// 	Key:   n.path[1:],
+						// 	Value: path[:end],
+						// }
+						if insertI18n {
+							(*ps) = append((*ps), Param{
+								Key:   "i18n",
+								Value: i18n,
+							})
+							insertI18n = false
+						}
+						(*ps) = append((*ps), Param{
 							Key:   n.path[1:],
 							Value: path[:end],
-						}
+						})
 					}
 
 					// We need to go deeper!
@@ -382,6 +405,7 @@ walk: // Outer loop for walking the tree
 							path = path[end:]
 							n = n.children[0]
 							prefix = n.path
+							// insertI18n = true
 							continue walk
 						}
 
@@ -408,12 +432,23 @@ walk: // Outer loop for walking the tree
 							ps = params()
 						}
 						// Expand slice within preallocated capacity
-						i := len(*ps)
-						*ps = (*ps)[:i+1]
-						(*ps)[i] = Param{
+						// i := len(*ps)
+						// *ps = (*ps)[:i+1]
+						// (*ps)[i] = Param{
+						// 	Key:   n.path[2:],
+						// 	Value: path,
+						// }
+						if insertI18n {
+							(*ps) = append((*ps), Param{
+								Key:   "i18n",
+								Value: i18n,
+							})
+							insertI18n = false
+						}
+						(*ps) = append((*ps), Param{
 							Key:   n.path[2:],
 							Value: path,
-						}
+						})
 					}
 
 					handle = n.handle
@@ -458,6 +493,7 @@ walk: // Outer loop for walking the tree
 				path == prefix[:len(prefix)-1] && n.handle != nil)
 		return
 	}
+	panic("don't get here")
 }
 
 // Makes a case-insensitive lookup of the given path and tries to find a handler.
