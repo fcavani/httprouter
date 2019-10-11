@@ -1,10 +1,24 @@
-# HttpRouter [![Build Status](https://travis-ci.org/julienschmidt/httprouter.svg?branch=master)](https://travis-ci.org/julienschmidt/httprouter) [![Coverage Status](https://coveralls.io/repos/github/julienschmidt/httprouter/badge.svg?branch=master)](https://coveralls.io/github/julienschmidt/httprouter?branch=master) [![GoDoc](https://godoc.org/github.com/julienschmidt/httprouter?status.svg)](http://godoc.org/github.com/julienschmidt/httprouter)
+# HttpRouter [![Build Status](https://travis-ci.org/fcavani/httprouter.svg?branch=develop)](https://travis-ci.org/fcavani/httprouter) [![Coverage Status](https://coveralls.io/repos/github/fcavani/httprouter/badge.svg?branch=develop)](https://coveralls.io/github/fcavani/httprouter?branch=develop) [![GoDoc](https://godoc.org/github.com/fcavani/httprouter?status.svg)](http://godoc.org/github.com/fcavani/httprouter)
 
 HttpRouter is a lightweight high performance HTTP request router (also called *multiplexer* or just *mux* for short) for [Go](https://golang.org/).
 
 In contrast to the [default mux](https://golang.org/pkg/net/http/#ServeMux) of Go's `net/http` package, this router supports variables in the routing pattern and matches against the request method. It also scales better.
 
 The router is optimized for high performance and a small memory footprint. It scales well even with very long paths and a large number of routes. A compressing dynamic trie (radix tree) structure is used for efficient matching.
+
+## Notes about github.com/fcavani/httproute develop version
+
+Handler signature change to:
+
+``` golang
+Handler(method, path string, i18n bool, handler http.Handler)
+```
+Now support http.Handler directly, and support internationalization true i18n parameter.
+The shortcut methods (GET, POST, PUT...) now have the i18n parameter too.
+
+Router structure have two more properties: *SupportedLangs*, that is a map with the supported
+languages and *DefaultLang* with a fallback language. See *TestLangRedir* in router_test.go to
+a example who to use this language support.
 
 ## Features
 
